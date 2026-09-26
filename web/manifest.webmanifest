@@ -1,0 +1,9 @@
+{
+  "name": "VitalGuard AI",
+  "short_name": "VitalGuard",
+  "description": "Camera PPG -> heart rate -> deterioration risk -> SHAP explanation",
+  "start_url": "/#capture",
+  "display": "standalone",
+  "background_color": "#070c16",
+  "theme_color": "#070c16"
+}

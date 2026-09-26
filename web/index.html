@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>VitalGuard AI — detect deterioration before it becomes critical</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1220'/%3E%3Cpath d='M4 17h6l2-6 4 12 3-8 2 2h7' stroke='%23ff4d5e' stroke-width='2.2' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<meta name="theme-color" content="#070c16" />
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="/static/styles.css" />
+<link rel="manifest" href="/static/manifest.webmanifest" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" class="logo" aria-hidden="true"><path d="M3 17h6l2.4-7.5L16 26l3.2-8.6 2 2.6H29" fill="none" stroke="url(#g)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4aa3ff"/><stop offset="1" stop-color="#ff4d5e"/></linearGradient></defs></svg>
+    <div>
+      <h1>VitalGuard <span>AI</span></h1>
+      <p class="motto">Detect deterioration before it becomes critical.</p>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="capture" role="tab">Capture</button>
+    <button class="tab" data-tab="ward" role="tab">Ward dashboard</button>
+    <button class="tab" data-tab="alerts" role="tab">Alerts <span id="alertBadge" class="badge">0</span></button>
+    <button class="tab" data-tab="model" role="tab">Model</button>
+  </nav>
+  <div class="conn"><span id="connDot" class="dot"></span><span id="connTxt">connecting…</span></div>
+</header>
+
+<main>
+<!-- ======================================================== CAPTURE ===== -->
+<section class="panel active" id="tab-capture">
+  <div class="grid2">
+    <div class="card">
+      <h2>1 · Fingertip capture <small>phone camera + flash → PPG</small></h2>
+      <div class="camwrap">
+        <video id="video" playsinline muted autoplay></video>
+        <canvas id="trace" width="640" height="120"></canvas>
+        <div class="roi" id="roiRing"></div>
+        <div class="cammsg" id="camMsg">Camera off. Tap <b>Start camera</b> and press your fingertip over the lens.</div>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="btnCam">Start camera</button>
+        <button class="btn" id="btnFlash" disabled>Flash: off</button>
+        <button class="btn danger" id="btnRec" disabled>Record 12 s</button>
+        <button class="btn" id="btnSim" title="Render a fingertip clip in-page and push it through the identical pixel→PPG→HR path">Simulate fingertip</button>
+        <label class="chk" title="Adds a 64 BPM movement artefact and heavy sensor noise so the step-5 quality gate refuses the reading"><input type="checkbox" id="simHard" /> shaky finger</label>
+      </div>
+      <label class="prog"><span id="progTxt">idle</span><span class="bar"><span id="progBar"></span></span></label>
+
+      <div class="vitals-in">
+        <h3>2 · Other vitals <small>SpO₂ probe / cuff / thermometer — leave blank if not measured</small></h3>
+        <div class="fields">
+          <label>SpO₂ %<input id="inSpo2" type="number" step="0.1" min="50" max="100" placeholder="—" /></label>
+          <label>Resp. rate/min<input id="inRr" type="number" step="1" min="4" max="60" placeholder="—" /></label>
+          <label>Systolic<input id="inSbp" type="number" step="1" min="40" max="260" placeholder="—" /></label>
+          <label>Diastolic<input id="inDbp" type="number" step="1" min="20" max="160" placeholder="—" /></label>
+          <label>Temp °C<input id="inTemp" type="number" step="0.1" min="30" max="43" placeholder="—" /></label>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="resultCard">
+      <h2>3 · Result <small>heart rate → risk → why</small></h2>
+      <div class="empty" id="resultEmpty">Nothing measured yet. The pipeline is: camera frames → mean green-channel intensity → band-pass filter → peak detection → BPM → AI risk → SHAP explanation.</div>
+      <div id="resultBody" hidden>
+        <div class="metrics">
+          <div class="metric"><span class="k">Heart rate</span><span class="v" id="oHr">–</span><span class="u">BPM</span></div>
+          <div class="metric"><span class="k">Signal quality</span><span class="v" id="oQual">–</span><span class="u" id="oQualU">/ 100</span></div>
+          <div class="metric"><span class="k">HRV RMSSD</span><span class="v" id="oHrv">–</span><span class="u">ms</span></div>
+          <div class="metric"><span class="k">Breathing</span><span class="v" id="oResp">–</span><span class="u">/min</span></div>
+        </div>
+        <canvas id="ppgPlot" width="620" height="140"></canvas>
+        <div class="riskrow">
+          <div class="gauge"><canvas id="gauge" width="200" height="120"></canvas><div><b id="oRisk">–</b><span class="tier" id="oTier">–</span></div></div>
+          <div class="advice" id="oAdvice"></div>
+        </div>
+        <h4>Why — SHAP contribution to log-odds of deterioration</h4>
+        <div id="oFactors" class="factors"></div>
+        <div id="oFlags" class="flags"></div>
+        <div id="oNotes" class="notes"></div>
+        <p class="fine" id="oMeta"></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================== WARD ======== -->
+<section class="panel" id="tab-ward">
+  <div class="card">
+    <h2>Ward overview <small>live from SQLite via FastAPI · sorted by risk</small></h2>
+    <div class="row tight">
+      <button class="btn" id="btnSeed">Load demo ward (14 patients)</button>
+      <button class="btn ghost" id="btnRefresh">Refresh</button>
+      <span class="statline" id="wardStats"></span>
+    </div>
+    <div class="tablewrap"><table id="ptTable">
+      <thead><tr><th>Patient</th><th>MRN</th><th>Ward</th><th>HR</th><th>SpO₂</th><th>RR</th><th>BP</th><th>Temp</th><th>NEWS2</th><th>Risk</th><th>Alerts</th><th></th></tr></thead>
+      <tbody id="ptBody"></tbody>
+    </table></div>
+  </div>
+  <div class="card" id="detailCard">
+    <h2 id="detName">Select a patient row <small>trends, latest explanation, per-bed actions</small></h2>
+    <div id="detBody" class="empty">Pick any row above.</div>
+  </div>
+</section>
+
+<!-- ======================================================== ALERTS ====== -->
+<section class="panel" id="tab-alerts">
+  <div class="card">
+    <h2>Alert queue <small>created automatically when risk tier is high or critical</small></h2>
+    <div id="alertList" class="alerts"></div>
+  </div>
+</section>
+
+<!-- ======================================================== MODEL ======= -->
+<section class="panel" id="tab-model">
+  <div class="grid2">
+    <div class="card">
+      <h2>Validation <small>5-fold stratified CV</small></h2>
+      <div id="metricsBody" class="kv"><span class="empty">loading…</span></div>
+    </div>
+    <div class="card">
+      <h2>Global feature importance <small>mean |SHAP| across the cohort</small></h2>
+      <div id="impBody" class="factors"></div>
+      <h2 style="margin-top:18px">Architecture</h2>
+      <div class="arch"><svg viewBox="0 0 620 84" class="flowsvg">
+        <g font-size="10" fill="#cfe0ff" text-anchor="middle" font-family="ui-sans-serif,system-ui">
+        <rect x="2" y="18" width="86" height="42" rx="8"/><text x="45" y="36">Phone cam</text><text x="45" y="50" fill="#7f92b8">+ flash</text>
+        <rect x="106" y="18" width="86" height="42" rx="8"/><text x="149" y="36">OpenCV</text><text x="149" y="50" fill="#7f92b8">ROI green</text>
+        <rect x="210" y="18" width="86" height="42" rx="8"/><text x="253" y="36">SciPy</text><text x="253" y="50" fill="#7f92b8">band-pass</text>
+        <rect x="314" y="18" width="86" height="42" rx="8"/><text x="357" y="36">Peaks</text><text x="357" y="50" fill="#7f92b8">BPM + QA</text>
+        <rect x="418" y="18" width="86" height="42" rx="8"/><text x="461" y="36">HistGB</text><text x="461" y="50" fill="#7f92b8">risk 0–100</text>
+        <rect x="522" y="18" width="92" height="42" rx="8"/><text x="568" y="36">Dashboard</text><text x="568" y="50" fill="#7f92b8">SHAP + alert</text>
+        <g stroke="#3d5a8a" stroke-width="1.6" fill="none" marker-end="url(#ar)">
+          <path d="M88 39h16"/><path d="M192 39h16"/><path d="M296 39h16"/><path d="M400 39h16"/><path d="M504 39h16"/>
+        </g>
+        <defs><marker id="ar" markerWidth="7" markerHeight="7" refX="5" refY="3.2" orient="auto"><path d="M0 0l6 3.2L0 6.4z" fill="#3d5a8a"/></marker></defs>
+        </g></svg></div>
+      <p class="fine">All stages above are live in this prototype. The only stage simulated in-browser is the optical signal source; every filter, peak detector, model call and SHAP computation runs server-side on real numbers.</p>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>VitalGuard AI · hackathon prototype · not a medical device · clinician judgement always supersedes the model</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

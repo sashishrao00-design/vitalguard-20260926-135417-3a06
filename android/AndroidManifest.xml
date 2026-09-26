@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- steps 1: camera + flash are the sensor. no health permissions needed. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FLASHLIGHT" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <uses-feature android:name="android.hardware.camera.any" android:required="true" />
+    <uses-feature android:name="android.hardware.camera.flash" android:required="true" />
+    <uses-feature android:name="android.hardware.sensor.heartrate" android:required="false" />
+
+    <application
+        android:label="VitalGuard AI"
+        android:theme="@style/Theme.VitalGuard"
+        android:usesCleartextTraffic="true"
+        android:supportsRtl="true">
+        <!-- usesCleartextTraffic is required because the demo server is plain http on the LAN.
+             For anything beyond a hackathon, terminate TLS (or adb reverse) and drop this flag. -->
+        <activity
+            android:name=".CaptureActivity"
+            android:exported="true"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+data/*.db
+data/*.avi
+data/upload_*
+artifacts/
+model/*.joblib
+model/metrics.json
+.DS_Store
