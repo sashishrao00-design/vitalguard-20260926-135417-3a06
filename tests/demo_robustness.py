@@ -6,6 +6,7 @@ confirm "shaky finger" mode still gets refused.
 """
 
 import sys
+import re
 
 from playwright.sync_api import sync_playwright
 
@@ -15,6 +16,7 @@ N = 12
 # fields races with the gated -> re-roll sequence and reads a transient state.
 WAIT = ("(document.querySelector('#progTxt').textContent.indexOf('simulated truth') !== -1)"
         " || (document.querySelector('#progTxt').textContent.indexOf('was gated') !== -1)"
+        " || (document.querySelector('#progTxt').textContent.indexOf('DEMO rejected') !== -1)"
         " || ((document.querySelector('#diag') || {style:{display:'none'}}).style.display === 'block')")
 
 
@@ -34,7 +36,10 @@ def main() -> int:
             try:
                 p.wait_for_function(WAIT, timeout=20_000)
                 hr, risk, qual = p.inner_text("#oHr"), p.inner_text("#oRisk"), p.inner_text("#oQual")
-                ok = risk.strip()[0].isdigit()
+                truth = re.search(r"ground truth ([\d.]+)", p.inner_text("#oNotes"))
+                ok = bool(risk.strip() and risk.strip()[0].isdigit() and truth
+                          and abs(float(hr) - float(truth.group(1))) <= 3)
+                if not ok: fails += 1
                 rows.append((hr, risk, qual, "ok" if ok else "gated"))
                 scored += 1 if ok else 0
             except Exception:
@@ -58,7 +63,8 @@ def main() -> int:
         tier, prog = p.inner_text("#oTier"), p.inner_text("#progTxt")
         print(f"\nshaky-finger mode -> tier '{tier}' | status: {prog.strip()[:70]}")
         if "retry" not in tier.lower():
-            print("   note: shaky mode is probabilistic by design (random seed); refusal is expected but not guaranteed")
+            print("   FAIL: shaky demo was not refused")
+            fails += 1
         b.close()
 
     print("\n" + ("DEMO ROBUSTNESS OK" if fails == 0 else f"{fails} PROBLEM(S)"))

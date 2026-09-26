@@ -25,7 +25,7 @@ const api = async (path, opts = {}) => {
 const post = (p, body) => api(p, { method: "POST", body: JSON.stringify(body ?? {}) });
 const getJSON = (p) => api(p);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const FIXED_SEED = 20260926;   // verified: quality >=96 at every rate 60-130
+const FIXED_SEED = 20260926;   // reproducible synthetic signal; not a measurement
 const HARD_SEED = 4242;      // shaky-mode base seed (deterministic refusal)
 const TIERCOL = { critical: "#ff4d5e", high: "#ff9f2e", moderate: "#ffd83d", low: "#5ad1a5", minimal: "#4aa3ff" };
 
@@ -41,21 +41,47 @@ $$(".tab").forEach((b) => b.addEventListener("click", () => {
 
 /* --------------------------------------------------------------- camera --- */
 const S = { stream: null, track: null, vfc: null, raf: null, useVfc: false, last: -1, frames: [], recording: false,
-            timer: null, t0: 0, torch: false, roi: null, lastMean: 0, trace: [], sel: null };
+            timer: null, t0: 0, torch: false, roi: null, lastMean: 0, trace: [], sel: null, busy: false, requestId: 0 };
 const video = $("#video"), trace = $("#trace"), tctx = trace.getContext("2d");
 let off = document.createElement("canvas"), octx = off.getContext("2d", { willReadFrequently: true });
 
+function captureBusy(value) {
+  S.busy = value;
+  $("#btnSim").disabled = value;
+  $("#simHard").disabled = value;
+  $("#btnCam").disabled = value;
+  $("#btnRec").disabled = value || !S.stream;
+  $("#btnFlash").disabled = value || !S.track?.getCapabilities?.().torch;
+}
+function beginResult(source, truth) {
+  S.requestId += 1;
+  $("#resultBody").hidden = true;
+  $("#resultEmpty").hidden = false;
+  $("#resultEmpty").textContent = "Processing new capture… previous result cleared.";
+  $("#resultSource").textContent = source === "simulation"
+    ? `DEMO ONLY · synthetic ${truth.toFixed(1)} BPM input · NOT your heart rate · never saved to a patient`
+    : "CAMERA ESTIMATE · experimental, not medically validated · verify independently";
+  return S.requestId;
+}
 async function startCamera() {
+  if (S.busy) return;
   if (S.stream) return stopCamera();
+  captureBusy(true);
+  // A prior simulation hid the video and left its ROI behind. Restore both.
+  if (S.simCanvas) { S.simCanvas.remove(); S.simCanvas = null; }
+  video.style.display = "";
+  S.roi = null; S.frames = []; S.trace = []; S.last = -1; S.warned = false;
   try {
     S.stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: "environment" }, width: { ideal: 640 }, height: { ideal: 480 },
                frameRate: { ideal: 30, max: 60 } }, audio: false });
   } catch (e) {
     $("#camMsg").innerHTML = `Camera unavailable (${esc(e.name)}). Use <b>Simulate fingertip</b> to exercise the exact same processing path.`;
+    captureBusy(false);
     return;
   }
-  video.srcObject = S.stream; await video.play();
+  try { video.srcObject = S.stream; await video.play(); }
+  catch (e) { stopCamera(); captureBusy(false); diag(`Camera playback failed: ${esc(e.message)}`); return; }
   S.track = S.stream.getVideoTracks()[0];
   const caps = S.track.getCapabilities ? S.track.getCapabilities() : {};
   $("#btnFlash").disabled = !caps.torch;
@@ -67,6 +93,7 @@ async function startCamera() {
   sizeCanvas();
   schedule();
   diag(`sampling at ~${S.useVfc ? "camera frame rate (requestVideoFrameCallback)" : "display rate (rAF fallback)"} · luma will show here once frames flow`);
+  captureBusy(false);
 }
 function stopCamera() {
   if (S.vfc != null && typeof video.cancelVideoFrameCallback === "function") video.cancelVideoFrameCallback(S.vfc);
@@ -225,7 +252,9 @@ function collectVitals() {
   return { spo2: num("#inSpo2"), rr: num("#inRr"), sbp: num("#inSbp"), dbp: num("#inDbp"), temp_c: num("#inTemp") };
 }
 async function record() {
-  if (S.recording) return;
+  if (S.busy || S.recording || !S.stream) return;
+  captureBusy(true);
+  const requestId = beginResult("camera");
   S.recording = true; S.frames = []; S.trace = []; S.t0 = performance.now() / 1000;
   $("#btnRec").disabled = true; $("#btnRec").textContent = "Recording…";
   const DUR = 12000; const start = performance.now();
@@ -239,37 +268,33 @@ async function record() {
       if (k >= 1) { clearInterval(S.timer); res(); }
     }, 100);
   });
-  S.recording = false; $("#btnRec").disabled = false; $("#btnRec").textContent = "Record 12 s";
+  S.recording = false; $("#btnRec").textContent = "Record 12 s";
   $("#progTxt").textContent = `sending ${S.frames.length} frames to /api/ppg/process …`;
-  try { await submit({ frames: S.frames }); $("#progTxt").textContent = `done · ${S.frames.length} frames`; }
+  try { await submit({ frames: S.frames.slice(), requestId }); $("#progTxt").textContent = `done · ${S.frames.length} frames`; }
   catch (e) { fail(e.message); }
+  finally { captureBusy(false); }
 }
 async function runSim() {
-  const hard = !!($("#simHard") && $("#simHard").checked);
-  // Normal mode randomises the rate; "shaky" pins it, because the demo point is the
-  // gate refusing, and a random rate sometimes lands on a clip the artefact does not
-  // distort enough to detect (64 BPM shake against a 96 BPM pulse is a clean 1.5x
-  // ratio - incommensurate with the pulse harmonics, so it always shows as a
-  // competing line).
-  const hr = hard ? 96.0 : 60 + Math.random() * 70;
+  if (S.busy || S.recording) return;
+  const hard = !!$("#simHard").checked;
+  const hr = hard ? 96 : 80;
+  // Demo and physical capture must never share a live sampling loop.
+  if (S.stream) stopCamera();
+  captureBusy(true);
+  const requestId = beginResult("simulation", hr);
+  S.trace = [];
   $("#progTxt").textContent = hard
-    ? "rendering a SHAKY finger (64 BPM movement + heavy noise) - the gate should refuse this"
-    : "rendering synthetic fingertip clip …";
-  const gen = (seed, rate) => simulateFrames(rate, 12, 20, hard ? HARD_SEED + seed : FIXED_SEED,
-                                             hard ? { noise: 1.6, motion: 64 } : {});
+    ? "DEMO: synthetic 96 BPM plus motion/noise; rejection is expected"
+    : "DEMO: generating an 80 BPM signal; independently estimating it…";
   try {
-    let r = await submit({ frames: gen(0, hr), _truth: hr });
-    // A synthetic clip that trips the quality gate is fine as behaviour but a bad
-    // thing to hit mid-demo: re-roll once in normal mode. Real capture never does
-    // this - the app asks the person to retake, which is the point of the gate.
-    if (!hard && r && r.__gated) {
-      const hr2 = 96;   // a rate known to score cleanly at this amplitude
-      $("#progTxt").textContent = `first synthetic clip was gated - re-rolling at ${hr2.toFixed(0)} BPM`;
-      r = await submit({ frames: gen(0, hr2), _truth: hr2 });
-    }
-    if (r) $("#progTxt").textContent = r.__gated ? "clip was gated by the quality check (expected for 'shaky finger')"
-                                                  : `simulated truth ${(r.__truth ?? hr).toFixed(1)} BPM`;
+    const frames = simulateFrames(hr, 12, 20, hard ? HARD_SEED : FIXED_SEED,
+                                  hard ? { noise: 1.6, motion: 64 } : {});
+    const r = await submit({ frames, _truth: hr, requestId });
+    if (r) $("#progTxt").textContent = r.__gated
+      ? "DEMO rejected — no reliable measurement or risk score"
+      : `DEMO ONLY · simulated truth ${hr.toFixed(1)} BPM · estimate ${r.heart_rate.hr_bpm} BPM`;
   } catch (e) { fail(e.message); }
+  finally { captureBusy(false); }
 }
 function fail(m) { $("#resultEmpty").hidden = false; $("#resultBody").hidden = true;
   $("#resultEmpty").innerHTML = `<b style="color:#ff8b96">${esc(m)}</b>`; }
@@ -292,7 +317,7 @@ window.addEventListener("unhandledrejection", (e) => banner(`async error: ${e.re
   else if (!secure) banner(`Insecure context (isSecureContext=false, page is ${location.protocol}) — cameras are blocked. Use the https:// link.`, "#ff9f2e");
 })();
 
-async function submit({ frames, _truth }) {
+async function submit({ frames, _truth, requestId = S.requestId }) {
   if (!frames || frames.length < 16) {
     fail(`Only ${frames ? frames.length : 0} frames were captured (16 needed). ` +
       `The camera never started or the page lost focus. Press Start camera first and confirm the preview is moving.`);
@@ -300,10 +325,23 @@ async function submit({ frames, _truth }) {
     return;
   }
   const pick = ensurePick();
-  const body = { frames, vitals: collectVitals(), save: !!pick.value, patient_id: pick.value ? +pick.value : null };
+  const simulated = Number.isFinite(_truth);
+  const body = { frames, vitals: collectVitals(), source: simulated ? "simulation" : "camera",
+                 expected_hr_bpm: simulated ? _truth : null,
+                 save: !simulated && !!pick.value, patient_id: !simulated && pick.value ? +pick.value : null };
   const r = await post("/api/ppg/process", body);
-  if (_truth) r.__truth = _truth;
+  if (requestId !== S.requestId) return; // never render a stale response
+  if (simulated) r.__truth = _truth;
   const h = r.heart_rate;
+  // Independently check demo integrity in the client too, including older servers.
+  const candidate = h.hr_bpm;
+  const mismatch = simulated && (!Number.isFinite(candidate) || Math.abs(candidate - _truth) > 3);
+  const rejected = mismatch || r.retry_required || r.accepted === false || !r.risk;
+  if (rejected) {
+    r.risk = null; r.__gated = true;
+    if (mismatch) r.message = "Demo validation failed or the signal was refused. No measurement is shown; this is not your pulse.";
+    h.hr_bpm = null; h.hrv_rmssd_ms = null; h.breathing_rate_bpm = null;
+  }
   $("#resultEmpty").hidden = true; $("#resultBody").hidden = false;
   // one decimal always: the server rounds to 1 dp, so 89.0 would otherwise print as
   // "89" next to "quality 100.0" and read like a different kind of number
@@ -314,18 +352,19 @@ async function submit({ frames, _truth }) {
   drawPPG(r.waveform, h);
   const notes = $("#oNotes");
   notes.innerHTML = (h.guidance || []).map((g) => `<div>⚠ ${esc(g)}</div>`).join("")
-    + (_truth ? `<div style="color:#8ea3c4">simulated ground truth ${_truth.toFixed(1)} BPM → estimated ${h.hr_bpm} BPM (error ${Math.abs(_truth - (h.hr_bpm || 0)).toFixed(2)} BPM)</div>` : "")
-    + `<div style="color:#8ea3c4">spectral ${h.hr_spectral_bpm} · autocorrelation ${h.hr_temporal_bpm} · peak-interval ${h.hr_from_peaks_bpm ?? "n/a"} BPM (spread ${h.agree_bpm})</div>`;
+    + (simulated ? `<div style="color:#8ea3c4">simulated ground truth ${_truth.toFixed(1)} BPM → ${rejected ? "REJECTED (no measurement)" : `estimated ${h.hr_bpm} BPM (error ${Math.abs(_truth - h.hr_bpm).toFixed(2)} BPM)`}</div>` : "")
+    + `<details><summary>Technical diagnostics — not separate measurements</summary><div style="color:#8ea3c4">spectral candidate ${h.hr_spectral_bpm} · autocorrelation candidate ${h.hr_temporal_bpm} · peak-interval candidate ${h.hr_from_peaks_bpm ?? "n/a"} BPM (spread ${h.agree_bpm})</div></details>`;
   if (!r.risk) {
     r.__gated = true;
     $("#oRisk").textContent = "not scored"; $("#oTier").textContent = "retry required";
     $("#oTier").style.color = "#ff9f2e"; $("#oAdvice").innerHTML = `<b>${esc(r.message || "Signal too weak")}</b>Quality gate (step 5) blocked the reading before the AI stage.`;
     $("#oFactors").innerHTML = ""; $("#oFlags").innerHTML = ""; $("#oMeta").textContent = "";
     drawGauge(null);
-    return r;              // runSim reads __gated off this to re-roll; bare-return broke it
+    return r;              // report refusal; never silently generate another clip
   }
   const ex = r.risk;
   $("#oRisk").textContent = ex.risk_percent + "%";
+  if (simulated) $("#resultSource").textContent += " · risk shown below is also demo output";
   $("#oTier").textContent = ex.tier; $("#oTier").style.color = TIERCOL[ex.tier];
   drawGauge(ex.risk_score);
   const a = ex.advice || {};

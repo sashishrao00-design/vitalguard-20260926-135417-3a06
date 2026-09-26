@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -85,9 +85,9 @@ def score_vitals(vitals: dict) -> tuple[float, dict]:
 
 # ---------------------------------------------------------------------------
 class Frame(BaseModel):
-    t: float = Field(..., description="seconds since capture start (performance.now()/1000)")
-    v: float = Field(..., description="mean intensity of the ROI for that frame")
-    luma: float | None = Field(None, description="mean luma, for exposure rejection")
+    t: float = Field(..., allow_inf_nan=False, description="seconds since capture start (performance.now()/1000)")
+    v: float = Field(..., allow_inf_nan=False, description="mean intensity of the ROI for that frame")
+    luma: float | None = Field(None, allow_inf_nan=False, description="mean luma, for exposure rejection")
 
 
 class ProcessRequest(BaseModel):
@@ -95,6 +95,8 @@ class ProcessRequest(BaseModel):
     patient_id: int | None = None
     vitals: dict[str, Any] = Field(default_factory=dict)
     save: bool = True
+    source: Literal["camera", "simulation"] = "camera"
+    expected_hr_bpm: float | None = Field(None, gt=0, le=300, allow_inf_nan=False)
 
 
 @app.get("/api/health")
@@ -103,6 +105,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "model_ready": ready,
+        "app_version": "signal-safety-2",
         "model_artifact": str(MODEL_DIR / "risk_model.joblib"),
         "features": FEATURES,
         "db": db.stats() if Path(db.DB_PATH).exists() else {"patients": 0, "readings": 0},
@@ -122,6 +125,10 @@ def metrics() -> dict:
 def ppg_process(req: ProcessRequest) -> dict:
     if len(req.frames) < 16:
         raise HTTPException(422, f"need at least 16 frames, received {len(req.frames)}")
+    if req.source == "simulation" and req.expected_hr_bpm is None:
+        raise HTTPException(422, "simulation requires its known expected_hr_bpm")
+    if req.source == "camera" and req.expected_hr_bpm is not None:
+        raise HTTPException(422, "expected_hr_bpm is only allowed for synthetic simulations")
     t = np.array([f.t for f in req.frames], dtype=float)
     v = np.array([f.v for f in req.frames], dtype=float)
     if req.frames[0].luma is not None:
@@ -133,6 +140,7 @@ def ppg_process(req: ProcessRequest) -> dict:
     res = analyze(ppg)
     out: dict[str, Any] = {
         "heart_rate": res.to_dict(),
+        "source": req.source,
         "signal": {
             "duration_s": round(ppg.duration, 2), "frames": ppg.n_frames_used,
             "raw_mean_luma": round(ppg.raw_mean, 1), "ac_dc_ratio": round(ppg.ac_dc_ratio, 5),
@@ -145,20 +153,36 @@ def ppg_process(req: ProcessRequest) -> dict:
     }
 
     snr_db = res.flags.get("spectral_snr_db", -99)
-    if res.hr_bpm and res.quality >= 60 and snr_db >= 6.0:
+    demo_ok = True
+    if req.source == "simulation":
+        error = abs(res.hr_bpm - req.expected_hr_bpm) if res.hr_bpm is not None else None
+        demo_ok = error is not None and error <= 3.0
+        out["simulation_check"] = {"expected_hr_bpm": req.expected_hr_bpm,
+                                   "error_bpm": round(error, 3) if error is not None else None,
+                                   "tolerance_bpm": 3.0, "passed": demo_ok}
+    # Expected truth is an integrity CHECK, never substituted for the estimator.
+    # It only exists for synthetic data. Real camera readings do not get clamped.
+    out["accepted"] = bool(res.hr_bpm and res.quality >= 60 and snr_db >= 6.0 and demo_ok)
+    if out["accepted"]:
         vitals = dict(req.vitals)
         vitals["hr"] = res.hr_bpm
         p, ex = score_vitals(vitals)
         out["vitals"] = {k: vitals.get(k) for k in ("hr", "spo2", "rr", "sbp", "dbp", "temp_c")}
         out["risk"] = ex
         out["risk"]["risk_score"] = round(p, 4)
-        if req.save and req.patient_id is not None:
+        if req.source == "camera" and req.save and req.patient_id is not None:
             rec = db.add_reading(req.patient_id, vitals, ex, signal_quality=res.quality, source="phone")
             out["saved_reading_id"] = rec["id"]
     else:
         out["risk"] = None
         out["retry_required"] = True
         why = []
+        # Keep rejected estimates only in diagnostics, never as a measured HR.
+        out["heart_rate"]["flags"]["candidate_hr_bpm"] = res.hr_bpm
+        for key in ("hr_bpm", "hrv_rmssd_ms", "hrv_sdnn_ms", "breathing_rate_bpm"):
+            out["heart_rate"][key] = None
+        if not demo_ok:
+            why.append("synthetic signal estimate disagrees with its known input by more than 3 BPM")
         if not res.hr_bpm:
             why.append("no pulse frequency was found")
         else:

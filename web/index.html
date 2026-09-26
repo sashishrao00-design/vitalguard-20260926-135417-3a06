@@ -46,9 +46,10 @@
         <button class="btn primary" id="btnCam">Start camera</button>
         <button class="btn" id="btnFlash" disabled>Flash: off</button>
         <button class="btn danger" id="btnRec" disabled>Record 12 s</button>
-        <button class="btn" id="btnSim" title="Render a fingertip clip in-page and push it through the identical pixel→PPG→HR path">Simulate fingertip</button>
+        <button class="btn" id="btnSim" title="Render a fingertip clip in-page and push it through the identical pixel→PPG→HR path">Run demo · 80 BPM</button>
         <label class="chk" title="Adds a 64 BPM movement artefact and heavy sensor noise so the step-5 quality gate refuses the reading"><input type="checkbox" id="simHard" /> shaky finger</label>
       </div>
+      <p class="fine">Demo mode uses a known synthetic pulse, not your heart. Camera mode is an experimental estimate. Rejected readings are not displayed as measurements.</p>
       <label class="prog"><span id="progTxt">idle</span><span class="bar"><span id="progBar"></span></span></label>
 
       <div class="vitals-in">
@@ -65,12 +66,13 @@
 
     <div class="card" id="resultCard">
       <h2>3 · Result <small>heart rate → risk → why</small></h2>
+      <p id="resultSource" class="fine" role="status" style="padding:10px;border:1px solid #33507d;border-radius:8px">No capture yet · signal-safety-2</p>
       <div class="empty" id="resultEmpty">Nothing measured yet. The pipeline is: camera frames → mean green-channel intensity → band-pass filter → peak detection → BPM → AI risk → SHAP explanation.</div>
       <div id="resultBody" hidden>
         <div class="metrics">
           <div class="metric"><span class="k">Heart rate</span><span class="v" id="oHr">–</span><span class="u">BPM</span></div>
           <div class="metric"><span class="k">Signal quality</span><span class="v" id="oQual">–</span><span class="u" id="oQualU">/ 100</span></div>
-          <div class="metric"><span class="k">HRV RMSSD</span><span class="v" id="oHrv">–</span><span class="u">ms</span></div>
+          <div class="metric"><span class="k">Beat variability (not BPM)</span><span class="v" id="oHrv">–</span><span class="u">ms</span></div>
           <div class="metric"><span class="k">Breathing</span><span class="v" id="oResp">–</span><span class="u">/min</span></div>
         </div>
         <canvas id="ppgPlot" width="620" height="140"></canvas>
